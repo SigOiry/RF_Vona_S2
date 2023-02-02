@@ -82,7 +82,7 @@ for (i in 1:nrow(img_df)) {
   
   rf_class_img<-shpRF[which(shpRF$Image == img_df$tide[i])]
   stk<-stack(img_df$path[i])
-  
+  names(stk)<-c("blue","green","red","RedEdge","NIR")
   #### Rasterize shp to tif
   
   img_class<-stk[[1]]
