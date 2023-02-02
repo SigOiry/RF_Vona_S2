@@ -1,0 +1,244 @@
+---
+title: "RF_Vona"
+author: "Simon Oiry"
+format: 
+  docx:
+    reference-doc: Word_Template.docx
+editor: visual
+fig-dpi: 300
+---
+
+```{r library}
+
+library(rstudioapi)
+library(raster)
+library(sf)
+library(stars)
+library(terra)
+library(tidyverse)
+library(Utilities.Package)
+library(RStoolbox)
+library(ggdist)
+library(tidymodels)
+library(vetiver)
+
+
+```
+
+```{r image opening and resampling}
+
+img_path<-list.files("Data",pattern = ".SAFE",recursive = T, full.names = T,include.dirs = T)
+shp_path<-list.files("Data",pattern = ".shp",recursive = T, full.names = T)
+
+date<-img_path %>% 
+ gsub(".*/","",img_path) %>% 
+  substr(12,19)
+
+img_list<-list.files(img_path[i],pattern = ".jp2",recursive = T, full.names = T,include.dirs = T)
+img_list<-img_list[which(str_detect(img_list,"IMG_DATA"))]
+img_band_res<-str_sub(img_list,-11,-1)
+band<-substr(img_band_res,1,3)
+res<-substr(img_band_res,5,6)
+
+
+img_df<-data.frame(path=img_list,
+                 band = band,
+                 res = as.numeric(res))
+
+  img_df<-data.frame(path=img_list,
+                   band = band,
+                   res = as.numeric(res))
+  
+  for (ii in 1:length(unique(img_df$band))) {
+    a<-img_df %>% 
+      filter(band == unique(img_df$band)[ii]) %>% 
+      filter(res == min(.$res))
+  
+    if (ii == 1) {
+      img<-a
+    }else{
+      img<-rbind(img,a)
+    }
+  
+  }
+  
+img<-img %>% 
+mutate(resampling = case_when(res !=10 ~ "yes",
+                              TRUE ~ "no"))
+
+rast_10m<-raster(img[which(img$band == "B04"),]$path)
+mask<-st_read(shp_path[which(str_detect(shp_path,"mask"))])
+
+roi<-crop(rast_10m,mask)
+roi<-rasterize(mask,roi,mask = T)
+
+for (ii in 1:nrow(img)){
+  print (ii)
+  
+  if (img$resampling[ii]=="yes") {
+    x_rast<-raster(img$path[ii])
+    roi_x<- crop(x_rast, mask)
+    x<- rasterize( mask, roi_x, mask=T)
+    y<-roi
+    a<-resample(x,y,method="ngb")
+    if (ii == 1){
+     stk<-a
+    }else{
+     stk<-stack(stk,a)
+    }
+  }else{
+      a<-raster(img$path[ii])
+      a<-crop(a,mask)
+      a<-rasterize(mask, a, mask=T)
+    if (ii == 1) {
+      stk<-a
+    }else{
+      stk<-stack(stk,a)
+      
+    }
+  }
+}
+ names(stk)<-img$band
+ assign(paste0("stk_",date),stk)
+
+```
+
+```{r indices computation}
+
+indices_stk<-spectralIndices(stk,
+  blue = "B02",
+  green = "B03",
+  red = "B04",
+  nir = "B08",
+  redEdge1 = "B05",
+  redEdge2 = "B06",
+  redEdge3 = "B07",
+  swir2 = "B11",
+  swir3 = "B12")
+
+```
+
+```{r Train Random Forest}
+
+cropping_classes<-st_read(shp_path[which(str_detect(shp_path,"comparison"))])
+
+img_class<-stk[[1]]
+values(img_class)<-0
+
+for (i in 1:length(unique(cropping_classes$Class))) {
+  shp_mask<-cropping_classes[which(cropping_classes$Class==unique(cropping_classes$Class)[i]),]
+  mask_class<-rasterize(shp_mask,img_class,background = 0)
+    mask_class<-reclassify(mask_class, c(0,Inf,unique(cropping_classes$Class)[i]))
+    # mask_class[is.na(mask_class[])] <- 0 
+    if (i == 1) {
+      training_img<-img_class
+    }
+      training_img<-training_img+mask_class
+}
+
+
+stk_RF<-stack(stk,training_img)
+names(stk_RF)<-c(names(stk_RF)[-length(names(stk_RF))],"Class")
+
+
+stk_RF<-stk_RF %>%
+  as.data.frame() %>%
+  filter(Class != 0) %>%
+  # dplyr::filter(W_NDVI>0,
+  #               S_NDVI>0) %>%
+  mutate(Class = as.factor(Class))
+
+stk_RF<-stk_RF[complete.cases(stk_RF),]
+
+split_RF<-initial_split(stk_RF,strata = Class)
+train_RF<-training(split_RF)
+test_RF<-testing(split_RF)
+
+train_rec<-recipe(Class ~.,data = train_RF) %>% 
+  step_zv(all_predictors()) %>% 
+  step_center(all_predictors(),-all_outcomes()) %>% 
+  step_scale(all_predictors(),-all_outcomes())
+
+tune_spec<-rand_forest(mtry = sqrt(ncol(stk_indices)-1),
+            trees = 500,
+            min_n = 10) %>%
+  set_mode("classification") %>%
+  set_engine("ranger",importance = "impurity")
+
+
+# cl <- parallel::makePSOCKcluster(15)
+# doParallel::registerDoParallel(cl)
+# fitted_model<-tune_spec %>%
+#    set_engine("ranger",importance = "permutation") %>%
+#    fit(Class ~.,
+#        data = train_RF)
+# parallel::stopCluster(cl)
+
+
+last_rf_workflow <- 
+  tune_wf %>% 
+  update_model(tune_spec)
+
+last_rf_fit <- 
+  last_rf_workflow %>% 
+  last_fit(split_RF)
+
+last_rf_fit %>% 
+  collect_metrics()
+
+last_rf_fit %>%
+  extract_fit_parsnip() %>%
+  vip(num_features = 20)
+
+last_rf_fit %>%
+  extract_fit_parsnip() %>%
+  vip(num_features = 20)
+
+# 
+
+
+
+```
+
+
+```{r Predict RF}
+
+
+
+img_df<-as.data.frame(stk, xy = TRUE)
+  
+img_df <- img_df[complete.cases(img_df), ]
+
+coord<-img_df %>%
+  dplyr::select(c(x,y))
+
+
+img_df_no_coord<-img_df %>% 
+   dplyr::select(!c(x,y))
+
+v<-last_rf_fit %>% 
+   extract_workflow() %>% 
+   vetiver_model(model_name = "RF_model_STD")
+
+rf_rslt<-predict(v,img_df_no_coord,type = "class")
+
+output_df<-coord %>% 
+cbind(rf_rslt$.pred_class) %>% 
+   st_as_sf(coords = c("x", "y")) %>%
+   filter(!is.na(`rf_rslt$.pred_class`)) %>%
+   dplyr::group_by(`rf_rslt$.pred_class`) %>%
+   summarise(geometry = st_union(geometry))
+
+ rf_raster_out<-st_rasterize(output_df)
+ st_crs(rf_raster_out)<-st_crs(stk_indices)
+ 
+ output_name<-paste0("Output/RF/Rock_RF_",format(Sys.time(),"%d%m%Y"),".tif")
+
+ write_stars(rf_raster_out,output_name)
+
+
+
+```
+
+
+
