@@ -121,6 +121,7 @@ for (i in 1:nrow(img_df)) {
 stk_df<-stk_df[complete.cases(stk_df),]
 
 split_RF<-initial_split(stk_df,strata = Class)
+
 train_RF<-training(split_RF)
 test_RF<-testing(split_RF)
 
@@ -176,10 +177,6 @@ last_rf_fit <-
 
 last_rf_fit %>% 
   collect_metrics()
-
-last_rf_fit %>%
-  extract_fit_parsnip() %>%
-  vip(num_features = 20)
 
 last_rf_fit %>%
   extract_fit_parsnip() %>%
