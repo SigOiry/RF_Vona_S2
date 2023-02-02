@@ -200,7 +200,6 @@ last_rf_fit %>%
 
 ```
 
-
 ```{r Predict RF}
 
 
@@ -239,6 +238,3 @@ cbind(rf_rslt$.pred_class) %>%
 
 
 ```
-
-
-

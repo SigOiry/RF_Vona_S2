@@ -1,0 +1,11 @@
+﻿Band_ID;Band_Name;Wavelength
+B1;Blue444;444
+B2;Blue475;475
+B3;Green531;531
+B4;Green560;560
+B5;Red650;650
+B6;Red668;668
+B7;RedEdge705;705
+B8;RedEdge717;717
+B9;RedEdge740;740
+B10;NIR842;842
