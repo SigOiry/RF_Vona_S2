@@ -26,6 +26,7 @@ library(ggdist)
 library(tidymodels)
 library(vetiver)
 library(vip)
+library(flextable)
 
 
 ```
@@ -56,6 +57,9 @@ shpRF<-st_read(shp_path[which(str_detect(shp_path,"trainingROI"))])
 bandswv<-c("475","560","668","717","842")
 
 bandname<-c("blue","green","red","RedEdge","NIR")
+
+wavelength_drone_cam<-data.frame(wv = bandswv,
+                                 Band_ID = bandname)
 
 ```
 
@@ -143,60 +147,44 @@ split_RF<-initial_split(stk_df,strata = Class)
 train_RF<-training(split_RF)
 test_RF<-testing(split_RF)
 
-train_rec<-recipe(Class ~.,data = train_RF) %>% 
+rf_recipe<-recipe(Class ~.,data = train_RF) %>% 
   step_zv(all_predictors()) %>% 
   step_center(all_predictors(),-all_outcomes()) %>% 
   step_scale(all_predictors(),-all_outcomes())
+
+cores <- parallel::detectCores()
 
 rf_mod <-rand_forest(mtry = sqrt(ncol(stk_df)-1),
             trees = 500,
             min_n = 10) %>%
   set_mode("classification") %>%
-  set_engine("ranger")
+  set_engine("ranger", num.threads = cores)
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(rf_recipe) 
 
 
-cl <- parallel::makePSOCKcluster(15)
-doParallel::registerDoParallel(cl)
-# fitted_model<-tune_spec %>%
-#    set_engine("ranger",importance = "permutation") %>%
-#    fit(Class ~.,
-#        data = train_RF)
-
-rf_fit<-rf_mod %>% 
-  last_fit(Class~., split = split_RF)
-parallel::stopCluster(cl)
 
 #### Variable Importance 1
 
-# vi_model<-last_rf_fit %>%
-#    set_engine("ranger",importance = "permutation") %>%
-#    fit(Class ~.,
-#        data = train_RF) %>%
-#    vi() %>% 
-#   left_join(wavelength_micasense, by = c("Variable" = "Band_ID")) %>% ############### 
-#   dplyr::select(c(Wavelength,Importance,Variable)) %>% 
-#   arrange(Wavelength) %>% 
-#   mutate(std_val = (Importance/max(Importance))) 
-#   
-#   vi_model %>% 
-#     ggplot(aes(x=Wavelength,y=Importance))+
-#   geom_line()+
-#   theme_Bede()
+vi_model<-rf_mod %>%
+   set_engine("ranger",num.threads = cores,importance = "permutation") %>%
+   fit(Class ~.,
+       data = train_RF) %>%
+   vi()
+
+  vi_model %>%
+    ggplot(aes(x=Variable,y=Importance))+
+  geom_col()
   
-########
   
-  ###### Variable importance 2
-
-rf_fit %>% 
-  collect_metrics()
-
-last_rf_fit %>%
-  extract_fit_parsnip() %>%
-  vip(num_features = 20)
-
-# 
-
-
+ if (askYesNo("Es tu content avec ce model ?")) {
+   
+   rf_filted<-rf_workflow %>% 
+     fit(data = stk_df)
+ }
 
 ```
 
@@ -207,19 +195,19 @@ last_rf_fit %>%
 #| eval: true
 
 pckg_check()
+CSVlist<-list.files(pattern = ".csv",recursive = T)
+ClassID<-read.csv2(CSVlist[which(str_detect(CSVlist,"ClassID"))]) %>% 
+  mutate(ID_fct=as.factor(ID)) %>% 
+  mutate(ID_chr=as.character(ID))
 
  ##### variable importance assessment
- fited_model<-tune_wf %>%
-   set_engine("ranger",importance = "permutation") %>%
-   fit(Class ~.,
-       data = train_RF) 
-model_result<-as.tibble(test_RF) %>%
+model_result<-as_tibble(test_RF) %>% 
   dplyr::select(Class) %>% 
   dplyr::rename(Truth = Class) %>%
-  bind_cols(fited_model %>% 
+  bind_cols(rf_filted %>% 
                           predict(new_data = as.tibble(test_RF))) %>% 
-  bind_cols(fited_model %>% 
-              predict(new_data = as.tibble(test_RF), type = "prob")) %>%  
+  bind_cols(rf_filted %>% 
+              predict(new_data = as.tibble(test_RF), type = "prob")) %>% 
   left_join(ClassID, by = c("Truth"="ID_fct")) %>%                          ###########
   dplyr::select(-Truth,-ID) %>%
   rename(Truth = Class) %>%
@@ -254,7 +242,7 @@ flextable(conf_matrix) %>%
   add_header_row(values = rep("Truth",ncol(conf_matrix))) %>%
   merge_h(part = "header") %>%
     border_remove() %>% 
-    hline_top(j = 2:11,border=brdr) %>% 
+    hline_top(j = 2:ncol(conf_matrix),border=brdr) %>% 
     vline(j=2,border=brdr) %>% 
     align(align = "center",part = "all")
 
@@ -263,7 +251,29 @@ flextable(conf_matrix) %>%
 ```{r Predict RF}
 
 for (i in 1:nrow(img_df)) {
-  img<-stack(img_df$path[i]) %>% 
+  
+  stk<-stack(img_df$path[i])
+    
+    names(stk)<-bandname
+    if (answer_index == F) {
+        indices_stk<-spectralIndices(stk,
+      blue = "blue",
+      green = "green",
+      red = "red",
+      nir = "NIR",
+      redEdge1 = "RedEdge",
+      indices = indices_list)
+    }else{
+      indices_stk<-spectralIndices(stk,
+      blue = "blue",
+      green = "green",
+      red = "red",
+      nir = "NIR",
+      redEdge1 = "RedEdge")
+    }
+
+  
+  img<-stack(stk,indices_stk) %>% 
     as.data.frame(xy = TRUE)
   
   img<-img[complete.cases(img), ]
@@ -274,11 +284,7 @@ for (i in 1:nrow(img_df)) {
   img_no_coord<-img %>% 
    dplyr::select(!c(x,y))
   
-  v<-last_rf_fit %>% 
-   extract_workflow() %>% 
-   vetiver_model(model_name = "RF_model_STD")
-  
-  rf_rslt<-predict(v,img_df_no_coord,type = "class")
+  rf_rslt<-predict(rf_filted,img_no_coord,type = "class")
   
   output_df<-coord %>% 
     cbind(rf_rslt$.pred_class) %>% 
