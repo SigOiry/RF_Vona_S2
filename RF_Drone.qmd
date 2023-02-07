@@ -25,11 +25,12 @@ library(RStoolbox)
 library(ggdist)
 library(tidymodels)
 library(vetiver)
+library(vip)
 
 
 ```
 
-```{r image opening and resampling}
+```{r image opening}
 #| cache: true
 #| echo: false
 #| warning: false
@@ -50,25 +51,11 @@ img_df<-data.frame(path = img_path,
                    tide = tide,
                    date = date)
 
-shpRF<-st_read(shp_path[which(str_detect(shp_path,"RF"))])
-```
+shpRF<-st_read(shp_path[which(str_detect(shp_path,"trainingROI"))])
 
-```{r indices computation}
-#| cache: true
-#| echo: false
-#| warning: false
-#| eval: true
+bandswv<-c("475","560","668","717","842")
 
-indices_stk<-spectralIndices(stk,
-  blue = "B02",
-  green = "B03",
-  red = "B04",
-  nir = "B08",
-  redEdge1 = "B05",
-  redEdge2 = "B06",
-  redEdge3 = "B07",
-  swir2 = "B11",
-  swir3 = "B12")
+bandname<-c("blue","green","red","RedEdge","NIR")
 
 ```
 
@@ -78,11 +65,38 @@ indices_stk<-spectralIndices(stk,
 #| warning: false
 #| eval: true
 
+answer_index<-askYesNo("Would you like to compute all possible indices ?") 
+
+
+if (answer_index == FALSE) {
+indices_list<-c("NDVI","SAVI","NDWI")
+}
+
 for (i in 1:nrow(img_df)) {
   
-  rf_class_img<-shpRF[which(shpRF$Image == img_df$tide[i])]
+  rf_class_img<-shpRF[which(shpRF$Image == img_df$tide[i]),]
   stk<-stack(img_df$path[i])
-  names(stk)<-c("blue","green","red","RedEdge","NIR")
+  
+  names(stk)<-bandname
+  if (answer_index == F) {
+      indices_stk<-spectralIndices(stk,
+    blue = "blue",
+    green = "green",
+    red = "red",
+    nir = "NIR",
+    redEdge1 = "RedEdge",
+    indices = indices_list)
+  }else{
+    indices_stk<-spectralIndices(stk,
+    blue = "blue",
+    green = "green",
+    red = "red",
+    nir = "NIR",
+    redEdge1 = "RedEdge")
+  }
+
+  
+  stk<-stack(stk,indices_stk)
   #### Rasterize shp to tif
   
   img_class<-stk[[1]]
@@ -91,7 +105,7 @@ for (i in 1:nrow(img_df)) {
   for (ii in 1:length(unique(rf_class_img$Class))) {
   shp_mask<-rf_class_img[which(rf_class_img$Class==unique(rf_class_img$Class)[ii]),]
   mask_class<-rasterize(shp_mask,img_class,background = 0)
-    mask_class<-reclassify(mask_class, c(0,Inf,unique(rf_class_img$Class)[ii]))
+    mask_class<-reclassify(mask_class, c(0,Inf,as.numeric(unique(rf_class_img$Class)[ii])))
     # mask_class[is.na(mask_class[])] <- 0 
     
     if (ii == 1) {
@@ -103,6 +117,8 @@ for (i in 1:nrow(img_df)) {
  stk<-stack(stk,training_img)
  names(stk)<-c(names(stk)[-length(names(stk))],"Class")
  
+ 
+ 
  temp_stk_df<-stk %>%
   as.data.frame() %>%
   filter(Class != 0) %>%
@@ -113,12 +129,14 @@ for (i in 1:nrow(img_df)) {
  if (i == 1) {
    stk_df<-temp_stk_df
  }else{
-   stk_df<-cbind(stk_df,temp_stk_df)
+   stk_df<-rbind(stk_df,temp_stk_df)
  }
 }
 
 
 stk_df<-stk_df[complete.cases(stk_df),]
+
+### c'est ici qu'il faut selectionner les colonnes a garder ou a enlever
 
 split_RF<-initial_split(stk_df,strata = Class)
 
@@ -130,11 +148,11 @@ train_rec<-recipe(Class ~.,data = train_RF) %>%
   step_center(all_predictors(),-all_outcomes()) %>% 
   step_scale(all_predictors(),-all_outcomes())
 
-tune_spec<-rand_forest(mtry = sqrt(ncol(stk_indices)-1),
+rf_mod <-rand_forest(mtry = sqrt(ncol(stk_df)-1),
             trees = 500,
             min_n = 10) %>%
   set_mode("classification") %>%
-  set_engine("ranger",importance = "impurity")
+  set_engine("ranger")
 
 
 # cl <- parallel::makePSOCKcluster(15)
@@ -144,15 +162,8 @@ tune_spec<-rand_forest(mtry = sqrt(ncol(stk_indices)-1),
 #    fit(Class ~.,
 #        data = train_RF)
 # parallel::stopCluster(cl)
-
-
-last_rf_workflow <- 
-  tune_wf %>% 
-  update_model(tune_spec)
-
-last_rf_fit <- 
-  last_rf_workflow %>% 
-  last_fit(split_RF)
+rf_fit<-rf_mod %>% 
+  fit(Class~., data = train_RF)
 
 #### Variable Importance 1
 
@@ -188,7 +199,6 @@ last_rf_fit %>%
 
 ```
 
-
 ```{r accuracy assessment and confusion matrix}
 #| cache: true
 #| echo: false
@@ -198,7 +208,7 @@ last_rf_fit %>%
 pckg_check()
 
  ##### variable importance assessment
- fited_model<-last_rf_fit %>%
+ fited_model<-tune_wf %>%
    set_engine("ranger",importance = "permutation") %>%
    fit(Class ~.,
        data = train_RF) 
@@ -248,7 +258,6 @@ flextable(conf_matrix) %>%
     align(align = "center",part = "all")
 
 ```
-
 
 ```{r Predict RF}
 
