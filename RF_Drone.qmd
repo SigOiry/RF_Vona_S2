@@ -155,15 +155,16 @@ rf_mod <-rand_forest(mtry = sqrt(ncol(stk_df)-1),
   set_engine("ranger")
 
 
-# cl <- parallel::makePSOCKcluster(15)
-# doParallel::registerDoParallel(cl)
+cl <- parallel::makePSOCKcluster(15)
+doParallel::registerDoParallel(cl)
 # fitted_model<-tune_spec %>%
 #    set_engine("ranger",importance = "permutation") %>%
 #    fit(Class ~.,
 #        data = train_RF)
-# parallel::stopCluster(cl)
+
 rf_fit<-rf_mod %>% 
-  fit(Class~., data = train_RF)
+  last_fit(Class~., split = split_RF)
+parallel::stopCluster(cl)
 
 #### Variable Importance 1
 
@@ -186,7 +187,7 @@ rf_fit<-rf_mod %>%
   
   ###### Variable importance 2
 
-last_rf_fit %>% 
+rf_fit %>% 
   collect_metrics()
 
 last_rf_fit %>%
